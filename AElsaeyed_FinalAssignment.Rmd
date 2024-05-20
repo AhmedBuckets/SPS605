@@ -19,6 +19,9 @@ library(Hmisc)
 library(psych)
 library(MASS)
 library(caret)
+library(tidyverse)
+library(randomForest)
+
 ```
 
 ```{r data prep, include=TRUE}
@@ -397,68 +400,63 @@ cat("95% CI for the empirical data:", ci_lower, "to", ci_upper, "\n")
 ```
 
 ## Modeling
-There are over 70 explanatory variables in this data set, and so I will employ PCA to reduce the dimensionality. 
 
-### Cleanup and Factorize
-Before that though we need to clean up the data to make it usable in PCA. I will use some quick imputation techniques to fill in missing data with median values. I will also convert categorical variables into factors to speed up processing. 
-```{r data cleanup}
-
-sale_data_cleaned <- sale_data
-
-int_vars <- names(sale_data_cleaned)[sapply(sale_data_cleaned, is.integer)]
-sale_data_cleaned[int_vars] <- lapply(sale_data_cleaned[int_vars], as.numeric)
-
-sale_data_cleaned <- sale_data_cleaned %>%
-  select_if(is.numeric)
-
-preProcess_num <- preProcess(sale_data_cleaned, method = "medianImpute")
-sale_data_cleaned <- predict(preProcess_num, sale_data_cleaned)
-
-is_constant <- sapply(sale_data_cleaned, function(x) length(unique(x)) == 1)
-sale_data_cleaned <- sale_data_cleaned[, !is_constant]
-
-near_zero_var <- nearZeroVar(sale_data_cleaned, saveMetrics = TRUE)
-sale_data_cleaned <- sale_data_cleaned[, !near_zero_var$zeroVar]
-
-
-glimpse(sale_data_cleaned)
-```
-
-Next I will scale the numerical features in order to use PCA. 
-```{r scale }
-sale_data_cleaned <- scale(sale_data_cleaned)
-```
-
-Importing the testing data:
-```{r test data}
+```{r pull in test data}
 my_git_url2 <- getURL("https://raw.githubusercontent.com/AhmedBuckets/SPS605/main/test.csv")
-sale_data_test <- read.csv(text = my_git_url2, quote = "")
+test_data <- read.csv(text = my_git_url2, quote = "")
 ```
 
-I will modify the test data so the shape looks like the training data
-```{r clean test data}
-sale_data_test_cleaned <- sale_data_test
+```{r model}
 
-int_vars <- names(sale_data_test_cleaned)[sapply(sale_data_test_cleaned, is.integer)]
-sale_data_test_cleaned[int_vars] <- lapply(sale_data_test_cleaned[int_vars], as.numeric)
+# Refresh original sales data 
+my_git_url <- getURL("https://raw.githubusercontent.com/AhmedBuckets/SPS605/main/train.csv")
+sale_data <- read.csv(text = my_git_url, quote = "")
 
-sale_data_test_cleaned <- sale_data_test_cleaned %>%
-  select_if(is.numeric)
+impute_missing_values <- function(df) {
+  for (col in colnames(df)) {
+    if (is.numeric(df[[col]])) {
+      # Impute continuous variables with the mean
+      df[[col]][is.na(df[[col]])] <- mean(df[[col]], na.rm = TRUE)
+    } else {
+      # Impute categorical variables with the most frequent value
+      df[[col]][is.na(df[[col]])] <- names(sort(table(df[[col]]), decreasing = TRUE))[1]
+    }
+  }
+  return(df)
+}
+
+# Impute missing values in both datasets
+sale_data <- impute_missing_values(sale_data)
+test_data <- impute_missing_values(test_data)
+
+# Extract the sale price col
+sale_price <- sale_data$SalePrice
+
+# Drop the SalePrice column from the training data
+sale_data <- sale_data[, !names(sale_data) %in% "SalePrice"]
+
+# Ensure the test data has the same columns as the training data
+# this previously gave me a lot of trouble
+test_data <- test_data[, colnames(sale_data)]
+
+# Fit the random forest model
+set.seed(123)  
+rf_model <- randomForest(x = sale_data, y = sale_price, ntree = 500, importance = TRUE)
+
+# use the test data
+predictions <- predict(rf_model, newdata = test_data)
+
+# Print the model summary and the predictions
+print(rf_model)
+
 ```
 
-Split the data
-```{r data split}
-set.seed(123)
-trainIndex <- createDataPartition(sale_data_cleaned[, "SalePrice"], p = .8, 
-                                  list = FALSE, 
-                                  times = 1)
-sale_train <- sale_data_cleaned[trainIndex, ]
-sale_test  <- sale_data_cleaned[-trainIndex, ]
+
+```{r write out preds}
+# predictions_df <- data.frame(Id = test_data$Id, SalePrice = predictions)
+# write.csv(predictions_df, "/Users/aelsaeyed/Documents/predictions.csv", row.names = FALSE)
 ```
 
-```{r apply pca}
-preProcess_PCA <- preProcess(sale_train, method = 'pca', pcaComp = 10)
-train_pca <- predict(preProcess_PCA, sale_train)
-test_pca <- predict(preProcess_PCA, sale_test)
-```
 
+### My kaggle username: Ahmed Elsaeyed
+### My score: 0.14650
