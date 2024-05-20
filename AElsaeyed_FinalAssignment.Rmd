@@ -1,0 +1,464 @@
+---
+title: "AElsaeyed_FinalAssignment"
+author: "Ahmed Elsaeyed"
+date: "2024-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(RCurl)
+library(tidyr)
+library(dplyr) 
+library(RCurl)
+library(ggplot2)
+library(e1071)
+library(vcd)
+library(Hmisc)
+library(psych)
+library(MASS)
+library(caret)
+```
+
+```{r data prep, include=TRUE}
+my_git_url <- getURL("https://raw.githubusercontent.com/AhmedBuckets/SPS605/main/train.csv")
+sale_data <- read.csv(text = my_git_url, quote = "")
+```
+
+## Probability
+
+I listed out the quantitative variables and then checked their skew. I ordered the skew by most skew to least. The most skewed variable is MiscVal, but I chose to use LotArea because its more interesting and relevant. 
+
+The dependent variable is SalePrice.
+
+```{r check columns}
+# List of quantitative variables
+quantitative_vars <- c("LotFrontage", "LotArea", "YearBuilt", "YearRemodAdd", "MasVnrArea", 
+                       "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "1stFlrSF", 
+                       "2ndFlrSF", "LowQualFinSF", "GrLivArea", "BsmtFullBath", "BsmtHalfBath", 
+                       "FullBath", "HalfBath", "Bedroom", "Kitchen", "TotRmsAbvGrd", 
+                       "Fireplaces", "GarageYrBlt", "GarageCars", "GarageArea", "WoodDeckSF", 
+                       "OpenPorchSF", "EnclosedPorch", "3SsnPorch", "ScreenPorch", "PoolArea", 
+                       "MiscVal", "MoSold", "YrSold", "SalePrice")
+
+quantitative_vars <- quantitative_vars[quantitative_vars %in% colnames(sale_data)]
+
+# print(quantitative_vars)
+```
+
+
+```{r skewed vars}
+# Calculate skewness for each quantitative variable
+skewness <- sapply(sale_data[quantitative_vars], function(x) ifelse(is.numeric(x), skewness(x, na.rm = TRUE), NA))
+
+# Sort the variables by skewness
+skewness_sorted <- sort(unlist(skewness), decreasing = TRUE, na.last = TRUE)
+
+# Output the sorted skewness values
+head(skewness_sorted, 5)
+
+skewed_var <- "LotArea"
+```
+
+```{r explore data}
+
+# Label the dependent variable and the skewed independent variable
+X <- sale_data[[skewed_var]]
+Y <- sale_data$SalePrice
+
+# Visualize the skewed variable
+ggplot(sale_data, aes(x = X)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  labs(title = paste("Histogram of", skewed_var), x = skewed_var, y = "Frequency")
+
+# cat("The dependent variable Y is:", "SalePrice", "\n")
+# cat("The independent variable X with the highest skewness is:", skewed_var, "\n")
+```
+
+Calculating the probabilities:
+```{r find the probs}
+# Estimate the 3rd quartile of X and the 2nd quartile of Y
+x <- quantile(X, 0.75, na.rm = TRUE)
+y <- quantile(Y, 0.50, na.rm = TRUE)
+
+# Calculate counts for each combination
+counts <- sale_data %>%
+  summarise(
+    X_le_x_Y_le_y = sum(X <= x & Y <= y, na.rm = TRUE),
+    X_gt_x_Y_le_y = sum(X > x & Y <= y, na.rm = TRUE),
+    X_le_x_Y_gt_y = sum(X <= x & Y > y, na.rm = TRUE),
+    X_gt_x_Y_gt_y = sum(X > x & Y > y, na.rm = TRUE)
+  )
+
+# Calculate probabilities
+total_count <- nrow(sale_data)
+P_X_gt_x_Y_gt_y <- counts$X_gt_x_Y_gt_y / total_count
+P_Y_gt_y <- (counts$X_le_x_Y_gt_y + counts$X_gt_x_Y_gt_y) / total_count
+P_X_gt_x_given_Y_gt_y <- P_X_gt_x_Y_gt_y / P_Y_gt_y
+P_X_le_x_given_Y_gt_y <- counts$X_le_x_Y_gt_y / total_count / P_Y_gt_y
+
+# Output the probabilities
+cat("P(X > x | Y > y):", P_X_gt_x_given_Y_gt_y, "\n")
+cat("P(X > x, Y > y):", P_X_gt_x_Y_gt_y, "\n")
+cat("P(X < x | Y > y):", P_X_le_x_given_Y_gt_y, "\n")
+```
+
+Getting the table of counts based on the probabilities:
+```{r }
+# Create the table with the specified structure
+table_counts <- matrix(c(
+  counts$X_le_x_Y_le_y, counts$X_le_x_Y_gt_y, counts$X_le_x_Y_le_y + counts$X_le_x_Y_gt_y,
+  counts$X_gt_x_Y_le_y, counts$X_gt_x_Y_gt_y, counts$X_gt_x_Y_le_y + counts$X_gt_x_Y_gt_y,
+  counts$X_le_x_Y_le_y + counts$X_gt_x_Y_le_y, counts$X_le_x_Y_gt_y + counts$X_gt_x_Y_gt_y, nrow(sale_data)
+), nrow = 3, byrow = TRUE, dimnames = list(c("<= 3rd quartile", "> 3rd quartile", "Total"), c("<= 2nd quartile", "> 2nd quartile", "Total")))
+
+# Print the table
+print(table_counts)
+```
+
+We find that P(A|B) does not equal P(A)P(B).
+Using the chi-squared test we see that the p-value is much lower than 0.05. 
+Given this information, we can confidently day that there is an association between the variables. 
+```{r chi-squared}
+# Create new variables A and B
+sale_data <- sale_data %>%
+  mutate(A = ifelse(X > x, 1, 0),
+         B = ifelse(Y > y, 1, 0))
+
+# Calculate probabilities
+P_A <- mean(sale_data$A)
+P_B <- mean(sale_data$B)
+P_A_given_B <- mean(sale_data$A[sale_data$B == 1])
+
+# Check if P(A|B) = P(A)P(B)
+cat("P(A):", P_A, "\n")
+cat("P(B):", P_B, "\n")
+cat("P(A|B):", P_A_given_B, "\n")
+cat("P(A) * P(B):", P_A * P_B, "\n")
+
+# Create a contingency table
+contingency_table <- table(sale_data$A, sale_data$B)
+
+# Perform Chi-Square test for association
+chi_square_test <- chisq.test(contingency_table)
+
+# Output the test result
+print(chi_square_test)
+
+```
+
+## Descriptive and Inferential Statistics
+
+### Summary Stats
+
+Below is a summary of the univariate stats. The mean lot area is 10516.83, and the lot area standard deviation is 998.265. Interestingly there is a max lot area of 215,245, which has to either be a mistake or a wild outlier- perhaps a large building with multiple family units or a farm (quite possible for Iowa).
+
+Sales prices also vary greatly, with a mean sale price of 180,921.2 and a standard deviation of 79,442.5. The surprising part was the minimum price of 34,900. 
+```{r univariate descriprtive stats}
+# Univariate Descriptive Statistics
+summary_stats <- sale_data %>%
+  summarise(
+    LotArea_mean = mean(LotArea, na.rm = TRUE),
+    LotArea_median = median(LotArea, na.rm = TRUE),
+    LotArea_sd = sd(LotArea, na.rm = TRUE),
+    LotArea_min = min(LotArea, na.rm = TRUE),
+    LotArea_max = max(LotArea, na.rm = TRUE),
+    SalePrice_mean = mean(SalePrice, na.rm = TRUE),
+    SalePrice_median = median(SalePrice, na.rm = TRUE),
+    SalePrice_sd = sd(SalePrice, na.rm = TRUE),
+    SalePrice_min = min(SalePrice, na.rm = TRUE),
+    SalePrice_max = max(SalePrice, na.rm = TRUE)
+  )
+print(summary_stats)
+
+```
+
+
+### Histograms
+
+The histograms below show us that both variables skew right. Most values are to the left of the mean, which means that the extreme values are to the right. This tells us that its more likely for houses to be smaller and cheaper rather than larger and expensive. 
+```{r histograms}
+# Histograms
+ggplot(sale_data, aes(x = LotArea)) +
+  geom_histogram(binwidth = 100, fill = "blue", color = "black") +
+  labs(title = "Histogram of LotArea")
+
+ggplot(sale_data, aes(x = SalePrice)) +
+  geom_histogram(binwidth = 10000, fill = "green", color = "black") +
+  labs(title = "Histogram of SalePrice")
+```
+
+### Boxplots
+
+The boxplots tell us the same thing- theres a low median sale price/home lot size and a lot of the houses are around there, with many outiers on the higher end.
+```{r boxplots}
+# Boxplots
+ggplot(sale_data, aes(y = LotArea)) +
+  geom_boxplot(fill = "blue") +
+  labs(title = "Boxplot of LotArea")
+
+ggplot(sale_data, aes(y = SalePrice)) +
+  geom_boxplot(fill = "green") +
+  labs(title = "Boxplot of SalePrice")
+
+```
+
+### Scatterplot
+
+The scatterplot below shows us that there is at least some positive correlation between LotArea and SalePrice. 
+```{r scatterplot}
+# Scatterplot of X and Y
+ggplot(sale_data, aes(x = LotArea, y = SalePrice)) +
+  geom_point(color = "red") +
+  labs(title = "Scatterplot of LotArea and SalePrice", x = "LotArea", y = "SalePrice")
+```
+
+### Confidence Interval 95%
+
+The difference in means between LotArea and SalePrice is likely to be between -174514.8 and -166293.9. Since its a negative interval, it means SalePrice will be higher than LotArea. Considering the units (dollars vs square feet), this make sense. 
+```{r confidence interval}
+# 95% Confidence Interval for the Difference in Means
+lotarea_mean <- mean(sale_data$LotArea, na.rm = TRUE)
+saleprice_mean <- mean(sale_data$SalePrice, na.rm = TRUE)
+lotarea_sd <- sd(sale_data$LotArea, na.rm = TRUE)
+saleprice_sd <- sd(sale_data$SalePrice, na.rm = TRUE)
+n <- nrow(sale_data)
+
+difference_mean <- lotarea_mean - saleprice_mean
+se_difference <- sqrt((lotarea_sd^2 / n) + (saleprice_sd^2 / n))
+ci_lower <- difference_mean - qt(0.975, df = n-1) * se_difference
+ci_upper <- difference_mean + qt(0.975, df = n-1) * se_difference
+cat("95% CI for the difference in means:", ci_lower, "to", ci_upper, "\n")
+```
+
+### Correlation Matrix
+
+This correlation matrix shows us that the correlation coefficient between LotArea and SalePrice is 0.2638434. This suggests that there is a positive linear relationship between LotArea and SalePrice, but it is not a very strong relationship. 
+```{r correlation matrix}
+# Correlation Matrix
+correlation_matrix <- cor(sale_data %>% dplyr::select(LotArea, SalePrice), use = "complete.obs")
+print(correlation_matrix)
+```
+
+### Confidence Interval 99%
+
+The correlation between LotArea and SalePrice is between 0.2000196 and 0.3254375 with 99% confidence. This further supports a positive correlation between the two variables, especially considering the very low p-value of 1.123139e-24.
+```{r 99 ci}
+# Hypothesis Test for Correlation
+cor_test <- cor.test(sale_data$LotArea, sale_data$SalePrice, conf.level = 0.99)
+cat("Correlation coefficient:", cor_test$estimate, "\n")
+cat("99% CI for the correlation:", cor_test$conf.int[1], "to", cor_test$conf.int[2], "\n")
+
+# Output the p-value of the correlation test
+cat("p-value of the correlation test:", cor_test$p.value, "\n")
+
+```
+
+Overall we can say that we can be sure that the correlation between LotSize and SalePrice is positive, but the relationship isn't very strong. This could indicate that LotSize is an important factor for predicting SalePrice, but that there are other factors that affect it as well. 
+
+
+## Linear Algebra and Correlation
+
+### Correlation Matrix
+Below we find and invert the correlation matrix to investigate the relationship between SalePrice and LotArea while controlling for other variables. 
+
+```{r correlation matrices}
+# Calculate the correlation matrix
+correlation_matrix <- cor(sale_data %>% dplyr::select(LotArea, SalePrice), use = "complete.obs")
+print(correlation_matrix)
+
+# Invert the correlation matrix to obtain the precision matrix
+precision_matrix <- solve(correlation_matrix)
+print("Precision Matrix (Inverse of Correlation Matrix):")
+print(precision_matrix)
+```
+
+### Checks
+We then check to make sure that the inversion was correct by multiplying the correlation matrix and its inverse and vice versa. Both multiplications result in the identity matrix so we are all good.  
+```{r corr checks}
+
+# Multiply the correlation matrix by the precision matrix
+identity_matrix1 <- correlation_matrix %*% precision_matrix
+print("Correlation Matrix * Precision Matrix:")
+print(identity_matrix1)
+
+# Multiply the precision matrix by the correlation matrix
+identity_matrix2 <- precision_matrix %*% correlation_matrix
+print("Precision Matrix * Correlation Matrix:")
+print(identity_matrix2)
+```
+
+### PCA
+To go further into the relationship between these two variables, we delve into principal component analysis. The PCA performed below will break this relationship down into two components, PC1 and PC2. These components each account for a portion of the variance between these two variables. We see from the PCA summary below that PC1 explains 63.19% of the total variance, while PC2 explains 36.81%. 
+```{r PCA}
+# Conduct Principal Components Analysis (PCA)
+pca <- prcomp(sale_data %>% dplyr::select(LotArea, SalePrice), scale. = TRUE)
+print("PCA Summary:")
+summary(pca)
+
+```
+
+PCA loadings show us how each variable affects the principal components. We see that LotArea and SalePrice contribute positively to PC1- as either increases PC1 will increase. However PC2 is a little different- LotArea contributes positively to PC2 while SalePrice contributes negatively. This means if SalePrice increases, PC2 will decrease. 
+```{r PCA loadings}
+# Print the PCA loadings (eigenvectors)
+print("PCA Loadings:")
+print(pca$rotation)
+```
+
+The above plays out in the PCA scatterplot below, where PC1 is plotted against PC2. If PC1 increases, ie either LotArea or SalePrice increase, then there is a decrease in PC2 since PC2 is negatively correlated with one of the elements of PC1. 
+```{r pca scatter}
+# Plot the PCA results
+ggplot(data = as.data.frame(pca$x), aes(x = PC1, y = PC2)) +
+  geom_point() +
+  labs(title = "PCA Scatter Plot", x = "Principal Component 1", y = "Principal Component 2")
+
+# Variance Inflation Factors (VIFs) on the diagonal of the precision matrix
+vifs <- diag(precision_matrix)
+print("Variance Inflation Factors (VIFs):")
+print(vifs)
+```
+
+## Calculus Based Probability and Statistics 
+
+### Optimal Value of Lambda
+
+First, we shift the variable so that the minimum value is above zero. 
+```{r peek}
+min_LA <- min(sale_data$LotArea)
+print(min_LA)
+
+```
+
+Since we already know that the minimum value is above 0, we can skip the shift step. We are fitting an exponential distribution to this variable. 
+
+The rate parameter lambda represents the frequency of occurences, with a lower value meaning lower frequency of occurence for any one LotArea. The exponential distribution will have a mean of 1/lambda, which equals 10517.
+
+We will then select 1000 values from the exponential distribution and compare it with the original values of LotArea. 
+```{r lambda}
+skewed_var <- sale_data$LotArea
+
+shifted_var <- skewed_var 
+
+# Fit an exponential distribution to the data
+fit <- fitdistr(shifted_var, "exponential")
+lambda <- fit$estimate
+print("Optimal value of λ:")
+print(lambda)
+
+# Take 1000 samples from the exponential distribution using this value of λ
+samples <- rexp(1000, lambda)
+```
+
+### Histograms
+The histograms plotted on top of each other show that the exponential samples capture the right-skewness of the variable, but is truncated as far as the higher frequency values go. It also doesn't do a great job capturing the shape of the data, being much more right-skewed. 
+
+```{r histograms2}
+# Plot histograms of the original variable and the generated samples
+ggplot() +
+  geom_histogram(aes(x = shifted_var), binwidth = 100, color = "blue", alpha = 0.5) +
+  geom_histogram(aes(x = samples), binwidth = 100, color = "red", alpha = 0.5) +
+  labs(title = "Histogram of LotArea (blue) and Exponential Samples (red)", x = "Value", y = "Frequency")
+
+```
+
+### Compare Percentiles
+
+Comparing the theoretical percentiles vs the empirical ones, we see that the 5th percentile using the exponential CDF is much lower than the empirical 5th percentile= 539.4428 vs 3311.7. 
+
+We see that the CDF 95th percentile is 31505.6, much higher than the empirical 95th percentile of 17401.15. 
+
+This shows that in addition to not capturing the shape of the data very well, this exponential distribution also doesn't capture data well at the tails. 
+```{r exp percentiles}
+# Find the 5th and 95th percentiles using the exponential CDF
+percentiles <- qexp(c(0.05, 0.95), rate = lambda)
+cat("5th percentile using exponential CDF:", percentiles[1], "\n")
+cat("95th percentile using exponential CDF:", percentiles[2], "\n")
+```
+
+```{r empirical 5 and 95}
+# Provide the empirical 5th and 95th percentiles of the data
+empirical_percentiles <- quantile(shifted_var, c(0.05, 0.95))
+cat("Empirical 5th percentile:", empirical_percentiles[1], "\n")
+cat("Empirical 95th percentile:", empirical_percentiles[2], "\n")
+```
+
+### Empirical Confidence Intervals
+
+```{r 95 ci}
+# Generate a 95% confidence interval from the empirical data, assuming normality
+empirical_mean <- mean(shifted_var)
+empirical_sd <- sd(shifted_var)
+n <- length(shifted_var)
+se <- empirical_sd / sqrt(n)
+ci_lower <- empirical_mean - qt(0.975, df = n-1) * se
+ci_upper <- empirical_mean + qt(0.975, df = n-1) * se
+cat("95% CI for the empirical data:", ci_lower, "to", ci_upper, "\n")
+```
+
+## Modeling
+There are over 70 explanatory variables in this data set, and so I will employ PCA to reduce the dimensionality. 
+
+### Cleanup and Factorize
+Before that though we need to clean up the data to make it usable in PCA. I will use some quick imputation techniques to fill in missing data with median values. I will also convert categorical variables into factors to speed up processing. 
+```{r data cleanup}
+
+sale_data_cleaned <- sale_data
+
+int_vars <- names(sale_data_cleaned)[sapply(sale_data_cleaned, is.integer)]
+sale_data_cleaned[int_vars] <- lapply(sale_data_cleaned[int_vars], as.numeric)
+
+sale_data_cleaned <- sale_data_cleaned %>%
+  select_if(is.numeric)
+
+preProcess_num <- preProcess(sale_data_cleaned, method = "medianImpute")
+sale_data_cleaned <- predict(preProcess_num, sale_data_cleaned)
+
+is_constant <- sapply(sale_data_cleaned, function(x) length(unique(x)) == 1)
+sale_data_cleaned <- sale_data_cleaned[, !is_constant]
+
+near_zero_var <- nearZeroVar(sale_data_cleaned, saveMetrics = TRUE)
+sale_data_cleaned <- sale_data_cleaned[, !near_zero_var$zeroVar]
+
+
+glimpse(sale_data_cleaned)
+```
+
+Next I will scale the numerical features in order to use PCA. 
+```{r scale }
+sale_data_cleaned <- scale(sale_data_cleaned)
+```
+
+Importing the testing data:
+```{r test data}
+my_git_url2 <- getURL("https://raw.githubusercontent.com/AhmedBuckets/SPS605/main/test.csv")
+sale_data_test <- read.csv(text = my_git_url2, quote = "")
+```
+
+I will modify the test data so the shape looks like the training data
+```{r clean test data}
+sale_data_test_cleaned <- sale_data_test
+
+int_vars <- names(sale_data_test_cleaned)[sapply(sale_data_test_cleaned, is.integer)]
+sale_data_test_cleaned[int_vars] <- lapply(sale_data_test_cleaned[int_vars], as.numeric)
+
+sale_data_test_cleaned <- sale_data_test_cleaned %>%
+  select_if(is.numeric)
+```
+
+Split the data
+```{r data split}
+set.seed(123)
+trainIndex <- createDataPartition(sale_data_cleaned[, "SalePrice"], p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+sale_train <- sale_data_cleaned[trainIndex, ]
+sale_test  <- sale_data_cleaned[-trainIndex, ]
+```
+
+```{r apply pca}
+preProcess_PCA <- preProcess(sale_train, method = 'pca', pcaComp = 10)
+train_pca <- predict(preProcess_PCA, sale_train)
+test_pca <- predict(preProcess_PCA, sale_test)
+```
+
